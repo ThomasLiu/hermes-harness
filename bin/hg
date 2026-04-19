@@ -6,10 +6,16 @@
 
 set -euo pipefail
 
-HARNESS_DIR="${HARNESS_DIR:-$HOME/.hermes/harness}"
+# 检测 HARNESS_DIR（优先使用环境变量）
+if [[ -z "${HARNESS_DIR:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    HARNESS_DIR="$SCRIPT_DIR"  # hermes-harness 项目根目录
+fi
+
 LOG_DIR="$HARNESS_DIR/logs"
 TMP_DIR="$HARNESS_DIR/tmp"
 CONFIG="$HARNESS_DIR/config.yaml"
+PYTHONPATH="$HARNESS_DIR/hermes_harness:$PYTHONPATH"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -52,6 +58,7 @@ Hermes Harness — AI Development Harness
 用法: hg <命令> [参数]
 
 命令:
+  init             初始化 harness 环境
   new <需求描述>    启动新任务，走完整四阶段流程
   status           查看当前任务状态
   align            交互式需求对齐
@@ -61,13 +68,13 @@ Hermes Harness — AI Development Harness
   handoff          查看 handoff 历史
   learn            触发学习分析
   rollback         回滚上一次部署
-  init             初始化 harness 环境
+  test             运行测试
   help             显示帮助
 
 示例:
+  hg init
   hg new "帮我做一个用户登录功能"
   hg status
-  hg verify
 EOF
 }
 
@@ -103,33 +110,33 @@ gstack:
 
 # 三色旗配置
 flags:
-  yellow_threshold_ai_vs_actual_ratio: 0.2  # 超过20%偏差率触发规则强化
-  stuck_retry_max: 2                         # STICK 最大重试次数
-  large_file_loc: 200                        # 大文件阈值
+  yellow_threshold_ai_vs_actual_ratio: 0.2
+  stuck_retry_max: 2
+  large_file_loc: 200
 
 # 日志配置
 logging:
-  critical_retention: 5000                   # CRITICAL 日志保留条数
-  normal_retention: 500                      # NORMAL 日志滚动窗口
-  verbose_retention: 0                       # VERBOSE 不保留
+  critical_retention: 5000
+  normal_retention: 500
+  verbose_retention: 0
 
 # 性能基准（秒）
 benchmarks:
-  task_completion: 600                       # 任务完成基准时间（10分钟）
-  checkpoint_verify: 30                       # checkpoint 验证基准
-  review_per_file: 60                        # 每文件 review 基准
+  task_completion: 600
+  checkpoint_verify: 30
+  review_per_file: 60
 YAML
         success "配置已创建: $CONFIG"
     else
         log "配置已存在，跳过"
     fi
 
-    # 检查依赖工具
     log "检查依赖..."
     require_tool "curl"
     require_tool "jq" "brew install jq"
     require_tool "python3" "https://www.python.org/downloads/"
     success "依赖检查通过"
+    success "初始化完成！运行 'hg help' 查看可用命令"
 }
 
 cmd_new() {
@@ -152,33 +159,39 @@ cmd_new() {
     # 保存原始需求
     echo "$requirement" > "$req_dir/requirement.txt"
 
-    # 调用交互式对齐
-    cmd_align "$req_id"
+    # 生成对齐文档框架
+    cat > "$req_dir/alignment.yaml" << Yaml
+requirement_id: "R$req_id"
+original_requirement: "$requirement"
+rephrased: "【待确认】"
+scope_in: []
+scope_out: []
+acceptance_criteria: []
+risk_statements: []
+user_signature: false
+ai_signature: false
+created_at: "$(date -Iseconds)"
+Yaml
 
     # 记录任务开始
-    python3 "$HARNESS_DIR/bin/harness-log.py" \
-        event=task_start \
-        requirement_id="$req_id" \
-        requirement="$requirement" \
-        intent="pending"
-
-    log "STAGE 0 完成: $req_dir/alignment.yaml"
-    log "启动 STAGE 1: 规划与分工"
-    log "运行 MiniMax Router..."
-
-    # TODO: MiniMax Router 调用
-    # python3 "$HARNESS_DIR/bin/harness-router.py" --req-id "$req_id"
+    python3 -c "
+import sys
+sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
+from harness_log import write_log
+write_log('critical', 'task_start', requirement_id='R$req_id', requirement='$requirement', intent='pending')
+" 2>/dev/null || true
 
     success "任务已创建: R$req_id"
     echo ""
-    echo -e "${YELLOW}下一步:${NC} 运行 ${GREEN}hg status${NC} 查看任务状态"
+    echo -e "${YELLOW}请运行以下命令完成需求对齐:${NC}"
+    echo -e "  ${GREEN}hg align R$req_id${NC}"
+    echo -e "${YELLOW}或直接在需求文档中编辑: $req_dir/alignment.yaml${NC}"
 }
 
 cmd_status() {
     log "当前任务状态"
     echo "---"
 
-    # 读取最近的任务
     local latest_req
     latest_req=$(ls -t "$HARNESS_DIR/requirements/" 2>/dev/null | head -1)
 
@@ -221,7 +234,6 @@ cmd_status() {
 cmd_align() {
     local req_id="${1:-}"
     if [[ -z "$req_id" ]]; then
-        # 获取最新任务
         req_id=$(ls -t "$HARNESS_DIR/requirements/" 2>/dev/null | head -1)
     fi
     if [[ -z "$req_id" ]]; then
@@ -237,47 +249,36 @@ cmd_align() {
     echo -e "${BLUE}=== STAGE 0: 需求对齐 ===${NC}"
     echo -e "${BLUE}原始需求:${NC} $requirement"
     echo ""
-    echo "AI 重述需求（请确认是否正确）："
+    echo -e "${GREEN}【请编辑对齐文档】${NC}"
+    echo -e "文件: $req_dir/alignment.yaml"
     echo ""
-    echo -e "${YELLOW}【AI 将在这里生成需求重述，用户需要确认】${NC}"
+    echo -e "${YELLOW}需要完成:${NC}"
+    echo "  1. 需求重述（3句话，用户确认）"
+    echo "  2. 边界清单（scope in / scope out）"
+    echo "  3. 验收标准 AC1-AC5（可测试）"
+    echo "  4. 风险声明"
     echo ""
-    echo -e "${YELLOW}【边界清单 in/out 将在这里生成】${NC}"
-    echo ""
-    echo -e "${YELLOW}【验收标准 AC1-AC5 将在这里生成】${NC}"
-    echo ""
-    echo -e "${YELLOW}【风险声明将在这里生成】${NC}"
-    echo ""
-    echo -e "${GREEN}User ✅${NC} 确认需求对齐"
-    echo -e "${GREEN}AI ✅${NC} 签名确认"
-    echo ""
-
-    # 生成对齐文档
-    cat > "$req_dir/alignment.yaml" << Yaml
-requirement_id: "R$req_id"
-original_requirement: "$requirement"
-rephrased: "【待确认】"
-scope_in: []
-scope_out: []
-acceptance_criteria: []
-risk_statements: []
-user_signature: false
-ai_signature: false
-created_at: "$(date -Iseconds)"
-Yaml
-
-    success "对齐文档已创建: $req_dir/alignment.yaml"
+    echo -e "${GREEN}完成后将 alignment.yaml 中的 user_signature 设为 true${NC}"
 }
 
 cmd_verify() {
     log "手动触发 checkpoint 验证..."
-    # TODO: 调用 checkpoint 验证器
-    python3 "$HARNESS_DIR/bin/harness-checkpoint.py" --latest
+    python3 -c "
+import sys
+sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
+from harness_checkpoint import check_evidence
+
+# 读取最新任务的 evidence
+import json
+reqs = sorted('$HARNESS_DIR/requirements'.split('/'))
+# 简化：直接返回需要参数
+print('Usage: hg verify --skill /review --evidence-file <file>')
+" 2>&1
 }
 
 cmd_deploy() {
     log "执行部署..."
-    # TODO: 调用 /ship + /land-and-deploy
-    log "部署功能待实现"
+    error "部署功能待实现"
 }
 
 cmd_report() {
@@ -285,7 +286,7 @@ cmd_report() {
     echo "---"
     local report_file
     report_file=$(ls -t "$HARNESS_DIR/logs/reports/"daily-*.md 2>/dev/null | head -1)
-    if [[ -n "$report_file" ]]; then
+    if [[ -n "$report_file" && -f "$report_file" ]]; then
         cat "$report_file"
     else
         echo "暂无报告，运行 'hg learn' 生成"
@@ -294,22 +295,38 @@ cmd_report() {
 
 cmd_learn() {
     log "触发学习分析..."
-    python3 "$HARNESS_DIR/bin/harness-analyze.py" --today
+    python3 -c "
+import sys
+sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
+from harness_analyze import main as analyze_main
+analyze_main()
+" 2>&1 || error "分析脚本执行失败"
     success "分析完成，查看报告: hg report"
 }
 
 cmd_handoff() {
     log "Handoff 历史"
     echo "---"
-    python3 "$HARNESS_DIR/bin/harness-log.py" \
-        --query-flag=YELLOW,RED \
-        --limit=20 \
-        2>/dev/null || echo "暂无 handoff 记录"
+    python3 -c "
+import sys
+sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
+from harness_log import query_logs
+logs = query_logs(levels=['critical'], event_types=['yellow_trigger', 'red_trigger'], limit=20)
+for log in logs:
+    print(log)
+" 2>/dev/null || echo "暂无 handoff 记录"
+}
+
+cmd_test() {
+    log "运行测试..."
+    if command -v pytest &>/dev/null; then
+        pytest "$HARNESS_DIR/tests" -v
+    else
+        error "pytest 未安装，请运行: pip3 install pytest"
+    fi
 }
 
 cmd_rollback() {
-    log "回滚上一次部署..."
-    # TODO: 实现 rollback
     error "Rollback 功能待实现"
 }
 
@@ -317,7 +334,6 @@ cmd_rollback() {
 # 主入口
 #-------------------------------------------------------------------------------
 main() {
-    # 确保目录存在
     init_dirs 2>/dev/null || true
 
     local command="${1:-}"
@@ -333,6 +349,7 @@ main() {
         report) cmd_report ;;
         learn)  cmd_learn ;;
         handoff) cmd_handoff ;;
+        test)   cmd_test ;;
         rollback) cmd_rollback ;;
         help|--help|-h|"") show_help ;;
         *)

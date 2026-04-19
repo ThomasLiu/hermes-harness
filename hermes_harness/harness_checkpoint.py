@@ -3,6 +3,7 @@
 harness-checkpoint — Checkpoint 验证器
 验证 skill 输出的 evidence 是否满足最小集
 """
+import os
 import json
 import sys
 import argparse
