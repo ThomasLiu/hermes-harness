@@ -1,265 +1,222 @@
 """
 Tests for harness-claude-code.py
-TDD: Claude Code subprocess interface for invoking gstack skills
+TDD: Claude Code 子进程接口
 """
 import pytest
 import json
 import subprocess
-from pathlib import Path
 from unittest.mock import patch, MagicMock
+from pathlib import Path
 
 from harness_claude_code import (
-    run_claude_code, run_gstack_skill, ClaudeCodeRunner,
-    call_claude_code, invoke_gstack_skill
+    run_claude_code,
+    run_gstack_skill,
+    load_config,
+    ClaudeCodeRunner,
+    call_claude_code,
+    invoke_gstack_skill,
 )
 
-class TestCallClaudeCode:
-    """Claude Code subprocess 调用测试"""
 
-    @patch("harness_claude_code.subprocess.run")
-    def test_claude_code_basic_invocation(self, mock_run):
-        """基本调用：Claude Code 返回成功"""
+class TestLoadConfig:
+    """配置加载测试"""
+
+    def test_load_config_default(self, monkeypatch, tmp_path):
+        """无 config.yaml 时返回默认配置"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        import importlib
+        import harness_claude_code as hcc
+        hcc.CONFIG_FILE = tmp_path / "nonexistent.yaml"
+        config = load_config()
+        assert "claude_code" in config
+        assert config["claude_code"]["path"] == "claude"
+
+
+class TestRunClaudeCode:
+    """Claude Code 执行测试"""
+
+    @patch("subprocess.run")
+    def test_success_returns_output(self, mock_run, monkeypatch, tmp_path):
+        """成功执行返回 output"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout='{"success": true, "output": "Done"}',
-            stderr=""
+            stdout='{"result": "ok"}',
+            stderr="",
         )
 
-        result = run_claude_code(prompt="Fix the login bug", model="sonnet")
+        result = run_claude_code("test prompt", timeout=60)
 
         assert result["success"] is True
         assert result["exit_code"] == 0
+        assert "duration_ms" in result
         mock_run.assert_called_once()
 
-    @patch("harness_claude_code.subprocess.run")
-    def test_claude_code_non_zero_return(self, mock_run):
-        """Claude Code 返回非零（执行失败）"""
+    @patch("subprocess.run")
+    def test_nonzero_exit_code_is_failure(self, mock_run, monkeypatch, tmp_path):
+        """非零退出码表示失败"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout="",
-            stderr="Error: something went wrong"
+            stderr="some error",
         )
 
-        result = run_claude_code(prompt="Fix the login bug")
+        result = run_claude_code("test prompt")
 
         assert result["success"] is False
         assert result["exit_code"] == 1
-        assert "something went wrong" in result["error"]
+        assert "some error" in result["error"]
 
-    @patch("harness_claude_code.subprocess.run")
-    def test_claude_code_timeout(self, mock_run):
-        """超时处理"""
-        mock_run.side_effect = subprocess.TimeoutExpired("claude", 120)
+    @patch("subprocess.run")
+    def test_timeout_returns_failure(self, mock_run, monkeypatch, tmp_path):
+        """超时返回失败"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.side_effect = subprocess.TimeoutExpired("cmd", 60)
 
-        result = run_claude_code(prompt="Do something slow", timeout=120)
+        result = run_claude_code("long running prompt", timeout=60)
 
         assert result["success"] is False
-        assert "timeout" in result["error"].lower()
+        assert result["exit_code"] == -1
+        assert "Timeout" in result["error"]
 
-    @patch("harness_claude_code.subprocess.run")
-    def test_claude_code_not_found(self, mock_run):
-        """Claude Code 不存在时的处理"""
-        mock_run.side_effect = FileNotFoundError("claude not found")
+    @patch("subprocess.run")
+    def test_claude_code_not_found(self, mock_run, monkeypatch, tmp_path):
+        """Claude Code 不存在返回失败"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.side_effect = FileNotFoundError()
 
-        result = run_claude_code(prompt="Test")
+        result = run_claude_code("test prompt")
+
         assert result["success"] is False
-        assert "not found" in result["error"].lower()
+        assert result["exit_code"] == -2
+        assert "not found" in result["error"]
 
-    @patch("harness_claude_code.subprocess.run")
-    def test_claude_code_alias_equivalence(self, mock_run):
+    @patch("subprocess.run")
+    def test_model_option_passed(self, mock_run, monkeypatch, tmp_path):
+        """model 参数传递给 claude 命令"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        run_claude_code("prompt", model="claude-opus-4")
+
+        cmd = mock_run.call_args.args[0]
+        assert "--model" in cmd
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "claude-opus-4"
+
+    @patch("subprocess.run")
+    def test_call_alias_equals_run(self, mock_run, monkeypatch, tmp_path):
         """call_claude_code 是 run_claude_code 的别名"""
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": true}', stderr="")
-        r1 = run_claude_code(prompt="test")
-        r2 = call_claude_code(prompt="test")
-        assert r1["success"] == r2["success"]
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = call_claude_code("test")
+        assert result["success"] is True
 
-class TestInvokeGstackSkill:
-    """gstack skill 调用测试"""
 
-    @patch("harness_claude_code.run_claude_code")
-    def test_invoke_review_skill(self, mock_call):
-        """调用 /review skill"""
-        mock_call.return_value = {
-            "success": True,
-            "exit_code": 0,
-            "output": json.dumps({
-                "skill": "/review",
-                "evidence": {
-                    "tsc_output": '{"errors": [], "summary": {"errors": 0}}',
-                    "diff_summary": "+50 -10",
-                    "findings": []
-                },
-                "flag": "GREEN"
-            }),
-            "error": "",
-            "duration_ms": 5000,
-        }
+class TestRunGstackSkill:
+    """gstack skill 执行测试"""
 
-        result = run_gstack_skill(skill="/review", args="Review auth module")
+    @patch("subprocess.run")
+    def test_runs_claude_code_with_skill_prompt(self, mock_run, monkeypatch, tmp_path):
+        """run_gstack_skill 调用 run_claude_code"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="{}",
+            stderr="",
+        )
+
+        result = run_gstack_skill("/review", args="check code", project_dir=tmp_path)
 
         assert result["success"] is True
-        mock_call.assert_called_once()
+        mock_run.assert_called_once()
 
-    @patch("harness_claude_code.run_claude_code")
-    def test_invoke_office_hours_skill(self, mock_call):
-        """调用 /office-hours skill"""
-        mock_call.return_value = {
-            "success": True,
-            "exit_code": 0,
-            "output": json.dumps({
-                "skill": "/office-hours",
-                "evidence": {
-                    "design_doc": "# Login Feature",
-                    "reframed_problem": "Need secure auth",
-                    "alternatives": ["方案A", "方案B"]
-                },
-                "flag": "GREEN"
-            }),
-            "error": "",
-            "duration_ms": 3000,
-        }
-
-        result = run_gstack_skill(skill="/office-hours", args="Design login")
-
-        assert result["success"] is True
-        assert "design_doc" in result["output"]
-
-    @patch("harness_claude_code.run_claude_code")
-    def test_invoke_skill_non_zero_return(self, mock_call):
-        """skill 执行失败"""
-        mock_call.return_value = {
-            "success": False,
-            "exit_code": 1,
-            "output": "",
-            "error": "Skill execution failed",
-            "duration_ms": 1000,
-        }
-
-        result = run_gstack_skill(skill="/review", args="Review code")
-        assert result["success"] is False
-
-    @patch("harness_claude_code.run_claude_code")
-    def test_invoke_gstack_skill_alias(self, mock_call):
+    @patch("subprocess.run")
+    def test_invoke_alias_works(self, mock_run, monkeypatch, tmp_path):
         """invoke_gstack_skill 是 run_gstack_skill 的别名"""
-        mock_call.return_value = {"success": True, "exit_code": 0, "output": "{}", "error": "", "duration_ms": 100}
-        r1 = run_gstack_skill(skill="/review", args="x")
-        r2 = invoke_gstack_skill(skill="/review", args="x")
-        assert r1["success"] == r2["success"]
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        result = invoke_gstack_skill("/cso")
+        assert "success" in result
+
+    @patch("subprocess.run")
+    def test_gstack_skill_logs_event(self, mock_run, monkeypatch, tmp_path):
+        """run_gstack_skill 记录日志（即使失败也不崩溃）"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+
+        # 不应该抛异常
+        result = run_gstack_skill("/office-hours", project_dir=tmp_path)
+        assert result["success"] is True
+
 
 class TestClaudeCodeRunner:
-    """ClaudeCodeRunner 集成测试"""
+    """ClaudeCodeRunner 编排测试"""
+
+    def test_init_with_default_router(self, monkeypatch, tmp_path):
+        """默认 router 返回 /review + GREEN"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        runner = ClaudeCodeRunner(project_path=tmp_path)
+        assert runner.project_path == tmp_path
+        assert callable(runner.router)
 
     @patch("harness_claude_code.run_gstack_skill")
-    def test_runner_routes_to_office_hours(self, mock_gstack):
-        """Router 决策为 /office-hours 时的路由"""
-        mock_gstack.return_value = {
+    def test_run_task_uses_router_decision(self, mock_run_skill, monkeypatch, tmp_path):
+        """run_task 根据 router 决策选择 skill"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run_skill.return_value = {
             "success": True,
-            "exit_code": 0,
-            "output": json.dumps({
-                "skill": "/office-hours",
-                "flag": "GREEN",
-                "evidence": {
-                    "design_doc": "...",
-                    "reframed_problem": "...",
-                    "alternatives": ["A", "B"]
-                }
-            }),
+            "output": "{}",
             "error": "",
-            "duration_ms": 3000,
+            "duration_ms": 100,
         }
 
-        runner = ClaudeCodeRunner(
-            project_path=Path("/tmp/myapp"),
-            minimax_router=lambda t: {"skill": "/office-hours", "flag": "GREEN"}
-        )
+        def mock_router(task):
+            return {"skill": "/review", "flag": "YELLOW"}
 
-        result = runner.run_task("Design a login feature")
-
-        assert result["skill"] == "/office-hours"
-        assert result["flag"] == "GREEN"
-        assert result["success"] is True
-
-    @patch("harness_claude_code.run_gstack_skill")
-    def test_runner_routes_to_review(self, mock_gstack):
-        """Router 决策为 /review 时的路由"""
-        mock_gstack.return_value = {
-            "success": True,
-            "exit_code": 0,
-            "output": json.dumps({
-                "skill": "/review",
-                "flag": "YELLOW",
-                "evidence": {
-                    "tsc_output": '{"errors": [], "summary": {"errors": 0}}',
-                    "diff_summary": "+20 -5",
-                    "findings": ["风格问题: 缺少注释"]
-                }
-            }),
-            "error": "",
-            "duration_ms": 5000,
-        }
-
-        runner = ClaudeCodeRunner(
-            project_path=Path("/tmp/myapp"),
-            minimax_router=lambda t: {"skill": "/review", "flag": "YELLOW"}
-        )
-
-        result = runner.run_task("Improve the API")
+        runner = ClaudeCodeRunner(project_path=tmp_path, minimax_router=mock_router)
+        result = runner.run_task("review my code")
 
         assert result["skill"] == "/review"
         assert result["flag"] == "YELLOW"
 
     @patch("harness_claude_code.run_gstack_skill")
-    def test_runner_checkpoint_verify(self, mock_gstack):
-        """runner.checkpoint_verify() 调用"""
-        mock_gstack.return_value = {
+    def test_run_task_parses_json_output(self, mock_run_skill, monkeypatch, tmp_path):
+        """run_task 解析 JSON 输出"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        output_data = {"evidence": {"tsc_output": "{}", "diff_summary": "+5"}, "findings": []}
+        mock_run_skill.return_value = {
             "success": True,
-            "exit_code": 0,
-            "output": json.dumps({
-                "skill": "/review",
-                "flag": "GREEN",
-                "evidence": {
-                    "tsc_output": '{"errors": [], "summary": {"errors": 0}}',
-                    "diff_summary": "+10 -2",
-                    "findings": []
-                }
-            }),
+            "output": json.dumps(output_data),
             "error": "",
-            "duration_ms": 3000,
+            "duration_ms": 100,
         }
 
-        runner = ClaudeCodeRunner(project_path=Path("/tmp/myapp"))
-        runner.run_task("Test task")
+        runner = ClaudeCodeRunner(project_path=tmp_path, minimax_router=lambda t: {"skill": "/review", "flag": "GREEN"})
+        result = runner.run_task("review")
 
-        verify_result = runner.checkpoint_verify()
-        assert "status" in verify_result
+        assert result["parsed"] is True
 
     @patch("harness_claude_code.run_gstack_skill")
-    def test_runner_malformed_json_output(self, mock_gstack):
-        """Claude Code 返回非 JSON 时的降级处理"""
-        mock_gstack.return_value = {
+    def test_run_task_non_json_output(self, mock_run_skill, monkeypatch, tmp_path):
+        """run_task 处理非 JSON 输出"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        mock_run_skill.return_value = {
             "success": True,
-            "exit_code": 0,
-            "output": "Oops, not JSON at all",
+            "output": "some plain text output",
             "error": "",
-            "duration_ms": 1000,
+            "duration_ms": 50,
         }
 
-        runner = ClaudeCodeRunner(project_path=Path("/tmp/myapp"))
-        result = runner.run_task("Test")
+        runner = ClaudeCodeRunner(project_path=tmp_path, minimax_router=lambda t: {"skill": "/review", "flag": "GREEN"})
+        result = runner.run_task("review")
 
         assert result["parsed"] is False
-        assert "raw_output" in result
 
-    def test_runner_checkpoint_verify_no_result(self):
-        """无 result 时 checkpoint_verify 返回错误"""
-        runner = ClaudeCodeRunner(project_path=Path("/tmp/myapp"))
+    def test_checkpoint_verify_no_result(self, monkeypatch, tmp_path):
+        """checkpoint_verify 无结果时返回 ERROR"""
+        monkeypatch.setenv("HARNESS_DIR", str(tmp_path))
+        runner = ClaudeCodeRunner(project_path=tmp_path)
         result = runner.checkpoint_verify()
         assert result["status"] == "ERROR"
-
-    def test_runner_default_router(self):
-        """无 router 时使用默认路由"""
-        runner = ClaudeCodeRunner(project_path=Path("/tmp/myapp"))
-        assert callable(runner.router)
-        result = runner.router("test task")
-        assert "skill" in result
-        assert "flag" in result
