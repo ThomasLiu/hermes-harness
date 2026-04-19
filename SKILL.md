@@ -16,29 +16,65 @@
 ## 快速开始
 
 ```bash
-# 安装
-git clone https://github.com/thomas(你的username)/hermes-harness.git ~/.hermes/harness
+cd ~/Projects/hermes-harness
 
-# 在 Hermes 中激活 skill
-# 运行 /harness-init 完成初始化
+# 初始化
+./bin/hg init
 
-# 使用
-/hg new "帮我做一个用户登录功能"
-/hg status      # 查看当前任务状态
-/hg verify      # 手动触发 checkpoint 验证
-/hg report      # 查看今日性能报告
+# 启动新任务
+./bin/hg new "帮我做一个用户登录功能"
+./bin/hg status      # 查看当前任务状态
+./bin/hg align       # 完成需求对齐
+./bin/hg learn       # 触发学习分析
+./bin/hg report      # 查看今日性能报告
+
+# 运行测试
+PYTHONPATH=hermes_harness:$PYTHONPATH pytest tests/ -v
+```
+
+## 项目结构
+
+```
+hermes-harness/
+├── bin/
+│   └── hg              # 主入口脚本
+├── hermes_harness/     # Python 包
+│   ├── __init__.py
+│   ├── harness_log.py      # 结构化 JSONL 日志
+│   ├── harness_checkpoint.py  # Evidence 验证器
+│   ├── harness_router.py   # MiniMax Router
+│   ├── harness_analyze.py  # 每日性能分析
+│   └── harness_claude_code.py  # Claude Code 接口
+├── agents/
+│   ├── router/SYSTEM_PROMPT.md
+│   └── coder/RULES.md
+├── gstack-mappings/gstack-mappings.yaml
+├── tests/
+│   ├── unit/          # 单元测试
+│   └── integration/   # 端到端测试
+├── config.yaml
+└── pyproject.toml
+```
+
+## 测试
+
+```bash
+PYTHONPATH=hermes_harness:$PYTHONPATH pytest tests/ -v
+# 当前: 44 tests, 全部通过
 ```
 
 ## 可用命令
 
 | 命令 | 功能 |
 |------|------|
-| `/hg new <需求>` | 启动新任务，走完整四阶段流程 |
-| `/hg status` | 查看当前任务状态 + 三色旗 |
-| `/hg verify` | 手动触发 checkpoint 验证 |
-| `/hg report` | 查看今日性能报告 |
-| `/hg align` | 交互式需求对齐 |
-| `/hg deploy` | 执行 /ship + /land-and-deploy |
-| `/hg handoff` | 查看 handoff 历史 |
-| `/hg learn` | 触发学习分析（通常每日自动） |
-| `/hg rollback` | 回滚上一次部署 |
+| `hg init` | 初始化 harness 环境 |
+| `hg new <需求>` | 启动新任务，创建需求文档 |
+| `hg status` | 查看当前任务状态 + 三色旗 |
+| `hg align` | 交互式需求对齐 |
+| `hg verify` | 手动触发 checkpoint 验证 |
+| `hg deploy` | 执行 /ship + /land-and-deploy |
+| `hg report` | 查看今日性能报告 |
+| `hg handoff` | 查看 handoff 历史 |
+| `hg learn` | 触发学习分析 |
+| `hg test` | 运行 pytest 测试 |
+| `hg rollback` | 回滚上一次部署 |
