@@ -1,0 +1,41 @@
+# Hermes Harness 配置
+version: "1.0"
+
+# MiniMax API（用于 Router/Validator）
+minimax:
+  model: "MiniMax-Text-01"
+  api_key_env: "MINIMAX_API_KEY"
+  base_url: "https://api.minimax.io/v1"
+
+# Claude Code（用于执行 gstack skills）
+claude_code:
+  path: "claude"
+  model: "claude-opus-4-7"
+
+# gstack 路径
+gstack:
+  dir: "~/.claude/skills/gstack"
+  auto_update: true
+
+# 三色旗配置
+flags:
+  yellow_threshold_ai_vs_actual_ratio: 0.2
+  stuck_retry_max: 2
+  large_file_loc: 200
+
+# 日志配置
+logging:
+  critical_retention: 5000
+  normal_retention: 500
+  verbose_retention: 0
+
+# 性能基准（秒）
+benchmarks:
+  task_completion: 600
+  checkpoint_verify: 30
+  review_per_file: 60
+
+# 分析配置
+analyze:
+  schedule: "0 9 * * *"  # 每天 9:00 AM
+  report_dir: "~/.hermes/harness/logs/reports"

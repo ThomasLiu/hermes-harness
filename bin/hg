@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+#===============================================================================
+# hermes-harness — Hermes AI Development Harness
+# 入口脚本，处理 /hg 命令路由
+#===============================================================================
+
+set -euo pipefail
+
+HARNESS_DIR="${HARNESS_DIR:-$HOME/.hermes/harness}"
+LOG_DIR="$HARNESS_DIR/logs"
+TMP_DIR="$HARNESS_DIR/tmp"
+CONFIG="$HARNESS_DIR/config.yaml"
+
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+#-------------------------------------------------------------------------------
+# 工具函数
+#-------------------------------------------------------------------------------
+log() { echo -e "${BLUE}[harness]${NC} $*"; }
+warn() { echo -e "${YELLOW}[harness]${NC} WARN: $*" >&2; }
+error() { echo -e "${RED}[harness]${NC} ERROR: $*" >&2; }
+success() { echo -e "${GREEN}[harness]${NC} $*" >&2; }
+
+require_tool() {
+    if ! command -v "$1" &>/dev/null; then
+        error "$1 is required but not installed."
+        if [[ -n "${2:-}" ]]; then error "Install: $2"; fi
+        exit 1
+    fi
+}
+
+init_dirs() {
+    mkdir -p "$LOG_DIR"/{critical,normal,verbose}
+    mkdir -p "$TMP_DIR"
+    mkdir -p "$HARNESS_DIR/learn"/{router,coder,reviewer,qa,ship,shared}
+    mkdir -p "$HARNESS_DIR/requirements"
+    mkdir -p "$HARNESS_DIR/logs/reports"
+}
+
+#-------------------------------------------------------------------------------
+# 命令路由
+#-------------------------------------------------------------------------------
+show_help() {
+    cat << 'EOF'
+Hermes Harness — AI Development Harness
+
+用法: hg <命令> [参数]
+
+命令:
+  new <需求描述>    启动新任务，走完整四阶段流程
+  status           查看当前任务状态
+  align            交互式需求对齐
+  verify           手动触发 checkpoint 验证
+  deploy           执行 ship + land-and-deploy
+  report           查看今日性能报告
+  handoff          查看 handoff 历史
+  learn            触发学习分析
+  rollback         回滚上一次部署
+  init             初始化 harness 环境
+  help             显示帮助
+
+示例:
+  hg new "帮我做一个用户登录功能"
+  hg status
+  hg verify
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# 核心命令实现
+#-------------------------------------------------------------------------------
+
+cmd_init() {
+    log "初始化 Hermes Harness..."
+    init_dirs
+
+    if [[ ! -f "$CONFIG" ]]; then
+        log "创建默认配置..."
+        cat > "$CONFIG" << 'YAML'
+# Hermes Harness 配置
+version: "1.0"
+
+# MiniMax API（用于 Router/Validator）
+minimax:
+  model: "MiniMax-Text-01"
+  api_key_env: "MINIMAX_API_KEY"
+  base_url: "https://api.minimax.io/v1"
+
+# Claude Code（用于执行 gstack skills）
+claude_code:
+  path: "claude"
+  model: "claude-opus-4-7"
+
+# gstack 路径
+gstack:
+  dir: "~/.claude/skills/gstack"
+  auto_update: true
+
+# 三色旗配置
+flags:
+  yellow_threshold_ai_vs_actual_ratio: 0.2  # 超过20%偏差率触发规则强化
+  stuck_retry_max: 2                         # STICK 最大重试次数
+  large_file_loc: 200                        # 大文件阈值
+
+# 日志配置
+logging:
+  critical_retention: 5000                   # CRITICAL 日志保留条数
+  normal_retention: 500                      # NORMAL 日志滚动窗口
+  verbose_retention: 0                       # VERBOSE 不保留
+
+# 性能基准（秒）
+benchmarks:
+  task_completion: 600                       # 任务完成基准时间（10分钟）
+  checkpoint_verify: 30                       # checkpoint 验证基准
+  review_per_file: 60                        # 每文件 review 基准
+YAML
+        success "配置已创建: $CONFIG"
+    else
+        log "配置已存在，跳过"
+    fi
+
+    # 检查依赖工具
+    log "检查依赖..."
+    require_tool "curl"
+    require_tool "jq" "brew install jq"
+    require_tool "python3" "https://www.python.org/downloads/"
+    success "依赖检查通过"
+}
+
+cmd_new() {
+    local requirement="$*"
+    if [[ -z "$requirement" ]]; then
+        error "请提供需求描述"
+        echo "用法: hg new <需求描述>"
+        exit 1
+    fi
+
+    log "启动新任务: $requirement"
+    log "进入 STAGE 0: 需求对齐"
+
+    # 生成 requirement_id
+    local req_id
+    req_id=$(date +%s)
+    local req_dir="$HARNESS_DIR/requirements/$req_id"
+    mkdir -p "$req_dir"
+
+    # 保存原始需求
+    echo "$requirement" > "$req_dir/requirement.txt"
+
+    # 调用交互式对齐
+    cmd_align "$req_id"
+
+    # 记录任务开始
+    python3 "$HARNESS_DIR/bin/harness-log.py" \
+        event=task_start \
+        requirement_id="$req_id" \
+        requirement="$requirement" \
+        intent="pending"
+
+    log "STAGE 0 完成: $req_dir/alignment.yaml"
+    log "启动 STAGE 1: 规划与分工"
+    log "运行 MiniMax Router..."
+
+    # TODO: MiniMax Router 调用
+    # python3 "$HARNESS_DIR/bin/harness-router.py" --req-id "$req_id"
+
+    success "任务已创建: R$req_id"
+    echo ""
+    echo -e "${YELLOW}下一步:${NC} 运行 ${GREEN}hg status${NC} 查看任务状态"
+}
+
+cmd_status() {
+    log "当前任务状态"
+    echo "---"
+
+    # 读取最近的任务
+    local latest_req
+    latest_req=$(ls -t "$HARNESS_DIR/requirements/" 2>/dev/null | head -1)
+
+    if [[ -z "$latest_req" ]]; then
+        echo "没有运行中的任务"
+        return
+    fi
+
+    local req_dir="$HARNESS_DIR/requirements/$latest_req"
+    echo -e "${BLUE}Requirement ID:${NC} R$latest_req"
+    echo -e "${BLUE}需求:${NC} $(cat "$req_dir/requirement.txt" 2>/dev/null || echo 'N/A')"
+
+    if [[ -f "$req_dir/alignment.yaml" ]]; then
+        echo -e "${GREEN}✓${NC} 需求对齐已完成"
+    else
+        echo -e "${YELLOW}○${NC} 需求对齐未完成"
+    fi
+
+    if [[ -f "$req_dir/plan.yaml" ]]; then
+        echo -e "${GREEN}✓${NC} 规划已完成"
+    else
+        echo -e "${YELLOW}○${NC} 规划中..."
+    fi
+
+    if [[ -f "$req_dir/.hg_flags" ]]; then
+        local flag
+        flag=$(cat "$req_dir/.hg_flags")
+        case "$flag" in
+            GREEN)  echo -e "🟢 ${GREEN}GREEN${NC} — 执行中" ;;
+            YELLOW) echo -e "🟡 ${YELLOW}YELLOW${NC} — 等待用户输入" ;;
+            RED)    echo -e "🔴 ${RED}RED${NC} — 强制人工介入" ;;
+        esac
+    else
+        echo -e "○ 三色旗状态未设置"
+    fi
+
+    echo ""
+}
+
+cmd_align() {
+    local req_id="${1:-}"
+    if [[ -z "$req_id" ]]; then
+        # 获取最新任务
+        req_id=$(ls -t "$HARNESS_DIR/requirements/" 2>/dev/null | head -1)
+    fi
+    if [[ -z "$req_id" ]]; then
+        error "没有找到任务，请先运行 hg new <需求>"
+        exit 1
+    fi
+
+    local req_dir="$HARNESS_DIR/requirements/$req_id"
+    local requirement
+    requirement=$(cat "$req_dir/requirement.txt")
+
+    echo ""
+    echo -e "${BLUE}=== STAGE 0: 需求对齐 ===${NC}"
+    echo -e "${BLUE}原始需求:${NC} $requirement"
+    echo ""
+    echo "AI 重述需求（请确认是否正确）："
+    echo ""
+    echo -e "${YELLOW}【AI 将在这里生成需求重述，用户需要确认】${NC}"
+    echo ""
+    echo -e "${YELLOW}【边界清单 in/out 将在这里生成】${NC}"
+    echo ""
+    echo -e "${YELLOW}【验收标准 AC1-AC5 将在这里生成】${NC}"
+    echo ""
+    echo -e "${YELLOW}【风险声明将在这里生成】${NC}"
+    echo ""
+    echo -e "${GREEN}User ✅${NC} 确认需求对齐"
+    echo -e "${GREEN}AI ✅${NC} 签名确认"
+    echo ""
+
+    # 生成对齐文档
+    cat > "$req_dir/alignment.yaml" << Yaml
+requirement_id: "R$req_id"
+original_requirement: "$requirement"
+rephrased: "【待确认】"
+scope_in: []
+scope_out: []
+acceptance_criteria: []
+risk_statements: []
+user_signature: false
+ai_signature: false
+created_at: "$(date -Iseconds)"
+Yaml
+
+    success "对齐文档已创建: $req_dir/alignment.yaml"
+}
+
+cmd_verify() {
+    log "手动触发 checkpoint 验证..."
+    # TODO: 调用 checkpoint 验证器
+    python3 "$HARNESS_DIR/bin/harness-checkpoint.py" --latest
+}
+
+cmd_deploy() {
+    log "执行部署..."
+    # TODO: 调用 /ship + /land-and-deploy
+    log "部署功能待实现"
+}
+
+cmd_report() {
+    log "今日性能报告"
+    echo "---"
+    local report_file
+    report_file=$(ls -t "$HARNESS_DIR/logs/reports/"daily-*.md 2>/dev/null | head -1)
+    if [[ -n "$report_file" ]]; then
+        cat "$report_file"
+    else
+        echo "暂无报告，运行 'hg learn' 生成"
+    fi
+}
+
+cmd_learn() {
+    log "触发学习分析..."
+    python3 "$HARNESS_DIR/bin/harness-analyze.py" --today
+    success "分析完成，查看报告: hg report"
+}
+
+cmd_handoff() {
+    log "Handoff 历史"
+    echo "---"
+    python3 "$HARNESS_DIR/bin/harness-log.py" \
+        --query-flag=YELLOW,RED \
+        --limit=20 \
+        2>/dev/null || echo "暂无 handoff 记录"
+}
+
+cmd_rollback() {
+    log "回滚上一次部署..."
+    # TODO: 实现 rollback
+    error "Rollback 功能待实现"
+}
+
+#-------------------------------------------------------------------------------
+# 主入口
+#-------------------------------------------------------------------------------
+main() {
+    # 确保目录存在
+    init_dirs 2>/dev/null || true
+
+    local command="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$command" in
+        init)   cmd_init ;;
+        new)    cmd_new "$@" ;;
+        status) cmd_status ;;
+        align)  cmd_align ;;
+        verify) cmd_verify ;;
+        deploy) cmd_deploy ;;
+        report) cmd_report ;;
+        learn)  cmd_learn ;;
+        handoff) cmd_handoff ;;
+        rollback) cmd_rollback ;;
+        help|--help|-h|"") show_help ;;
+        *)
+            error "未知命令: $command"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

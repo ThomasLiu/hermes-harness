@@ -1,0 +1,186 @@
+# gstack skill 映射配置
+# 定义何种情况使用哪个 gstack skill，以及对应输出格式
+
+version: "1.0"
+
+# skill → evidence 映射
+skills:
+  /office-hours:
+    description: "YC 风格需求澄清，6 个 forcing questions"
+    output_schema:
+      design_doc: "string"        # 生成的设计文档
+      reframed_problem: "string"  # 重构后的问题描述
+      alternatives: "array"        # 3 个实现方案
+      assumptions: "array"        # 假设清单
+    when_to_use:
+      - "新功能第一次讨论"
+      - "需求模糊不清"
+      - "scope 不确定"
+    min_execution_time_seconds: 60  # 最短执行时间，避免跳过
+
+  /plan-ceo-review:
+    description: "CEO/Founder 视角审查，重新思考问题"
+    output_schema:
+      scope_analysis: "object"
+      risk_assessment: "object"
+      recommendation: "string"
+      four_modes: "object"  # Expansion/Selective/Hold/Reduction
+    when_to_use:
+      - "/office-hours 完成后"
+      - "重大功能规划"
+      - "scope 可能蔓延时"
+    prerequisite: "/office-hours"
+
+  /plan-eng-review:
+    description: "工程经理视角，锁定架构、数据流、边缘情况"
+    output_schema:
+      architecture_diagram: "string (ASCII)"
+      data_flow: "array"
+      edge_cases: "array"
+      failure_modes: "array"
+      test_matrix: "array"
+    when_to_use:
+      - "架构复杂时"
+      - "需要数据流图时"
+      - "关键系统"
+    prerequisite: "/plan-ceo-review"
+
+  /plan-design-review:
+    description: "设计师视角，设计质量评分"
+    output_schema:
+      design_ratings: "object"  # {dimension: score/10}
+      ten_star_vision: "string"
+      gaps: "array"
+      edit_suggestions: "array"
+    when_to_use:
+      - "有 UI 的功能"
+      - "需要设计评审时"
+
+  /review:
+    description: "高级工程师代码审查，找 bug"
+    output_schema:
+      findings: "array"
+      severity_summary: "object"  # {critical: N, high: N, medium: N, low: N}
+      auto_fixed: "array"
+      requires_attention: "array"
+    evidence_requirements:
+      tsc_output: true
+      diff_summary: true
+      min_findings: 0  # 0 也可能是 PASS
+    when_to_use:
+      - "每个代码变更后"
+      - "PR 创建前"
+      - "大文件修改后"
+
+  /cso:
+    description: "安全审查 OWASP Top 10 + STRIDE"
+    output_schema:
+      owasp_findings: "array"
+      stride_model: "object"
+      severity_summary: "object"
+      exploit_scenarios: "array"
+    evidence_requirements:
+      critical_block_deploy: true
+    when_to_use:
+      - "涉及认证/授权"
+      - "涉及数据敏感"
+      - "涉及第三方集成"
+
+  /qa:
+    description: "QA 浏览器测试 + 自动修复"
+    output_schema:
+      test_results: "object"
+      screenshots: "array"
+      bugs_found: "array"
+      auto_fixed: "array"
+      regression_tests: "array"
+    evidence_requirements:
+      playwright_required: true
+      screenshots: true
+    when_to_use:
+      - "功能实现完成后"
+      - "部署前"
+
+  /qa-only:
+    description: "QA 只报告，不修改代码"
+    output_schema:
+      test_results: "object"
+      screenshots: "array"
+      bugs_found: "array"
+    evidence_requirements:
+      screenshots: true
+    when_to_use:
+      - "只想了解质量状态"
+      - "用户不想自动修改"
+
+  /ship:
+    description: "发布工程师，sync + test + PR"
+    output_schema:
+      test_results: "object"
+      coverage_audit: "object"
+      pr_url: "string"
+      files_changed: "integer"
+    evidence_requirements:
+      test_results: true
+      coverage_audit: true
+    when_to_use:
+      - "所有检查通过后"
+      - "准备合并前"
+
+  /land-and-deploy:
+    description: "合并 + 部署 + 验证"
+    output_schema:
+      merge_status: "string"
+      deploy_status: "string"
+      health_check: "object"
+    when_to_use:
+      - "/ship 完成后"
+      - "PR 已 review 通过"
+
+  /canary:
+    description: "部署后监控"
+    output_schema:
+      console_errors: "array"
+      performance_regressions: "array"
+      page_failures: "array"
+      overall_status: "string"
+    when_to_use:
+      - "/land-and-deploy 后"
+      - "生产验证"
+
+  /document-release:
+    description: "技术文档自动更新"
+    output_schema:
+      updated_files: "array"
+      stale_files_detected: "array"
+    when_to_use:
+      - "/ship 之后"
+      - "发布前"
+
+# 流程编排：阶段 → 使用哪些 skills
+stages:
+  STAGE_0_requirements:
+    skills: []
+    description: "需求对齐，人工交互"
+
+  STAGE_1_planning:
+    skills:
+      - /office-hours
+      - /plan-ceo-review
+      - /plan-eng-review
+    description: "规划与分工，MiniMax 验证后进入 STAGE 2"
+
+  STAGE_2_implementation:
+    skills:
+      - /review
+      - /qa
+      - /cso  # 按需触发
+    description: "执行循环，直到所有 AC 覆盖"
+
+  STAGE_3_delivery:
+    skills:
+      - /ship
+      - /land-and-deploy
+      - /canary
+      - /document-release
+    description: "最终验收门控"
