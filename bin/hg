@@ -15,7 +15,7 @@ fi
 LOG_DIR="$HARNESS_DIR/logs"
 TMP_DIR="$HARNESS_DIR/tmp"
 CONFIG="$HARNESS_DIR/config.yaml"
-PYTHONPATH="$HARNESS_DIR/hermes_harness:$PYTHONPATH"
+PYTHONPATH="$HARNESS_DIR/hermes_harness:${PYTHONPATH:-}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -262,23 +262,116 @@ cmd_align() {
 }
 
 cmd_verify() {
-    log "手动触发 checkpoint 验证..."
-    python3 -c "
+    local skill="${1:-}"
+    local evidence_file="${2:-}"
+
+    if [[ -z "$skill" ]]; then
+        # 默认取最新任务
+        local latest_req
+        latest_req=$(ls -t "$HARNESS_DIR/requirements/" 2>/dev/null | head -1)
+        if [[ -z "$latest_req" ]]; then
+            error "没有运行中的任务"
+            exit 1
+        fi
+
+        local req_dir="$HARNESS_DIR/requirements/$latest_req"
+        evidence_file="$req_dir/checkpoint_latest.json"
+        skill="$(
+            grep -m1 'current_skill:' "$req_dir/alignment.yaml" 2>/dev/null \
+            || echo '/review'
+        )"
+        skill="${skill#current_skill: }"
+        skill="${skill// /}"
+    fi
+
+    log "运行 checkpoint 验证..."
+    log "  skill: $skill"
+
+    if [[ -n "$evidence_file" && -f "$evidence_file" ]]; then
+        log "  evidence: $evidence_file"
+    else
+        if [[ -f "$evidence_file" ]]; then
+            log "  evidence: (from stdin)"
+        else
+            warn "未提供 evidence-file，尝试加载: $evidence_file"
+        fi
+    fi
+
+    # 调用 Python checkpoint 验证器
+    local output
+    if output=$(PYTHONPATH="$HARNESS_DIR/hermes_harness:$PYTHONPATH" \
+        python3 -c "
 import sys
+import json
+from pathlib import Path
 sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
 from harness_checkpoint import check_evidence
 
-# 读取最新任务的 evidence
-import json
-reqs = sorted('$HARNESS_DIR/requirements'.split('/'))
-# 简化：直接返回需要参数
-print('Usage: hg verify --skill /review --evidence-file <file>')
-" 2>&1
+evidence_file = '$evidence_file'
+skill = '$skill'
+
+evidence = {}
+if evidence_file and Path(evidence_file).exists():
+    with open(evidence_file) as f:
+        evidence = json.load(f)
+elif Path('$HARNESS_DIR/requirements').exists():
+    reqs = sorted(Path('$HARNESS_DIR/requirements').glob('*'), reverse=True)
+    for req in reqs:
+        ck = req / 'checkpoint_latest.json'
+        if ck.exists():
+            with open(ck) as f:
+                evidence = json.load(f)
+            break
+
+result = check_evidence(skill, evidence)
+print(json.dumps(result, ensure_ascii=False, indent=2))
+" 2>&1); then
+        echo "$output" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+status = data.get('status', 'UNKNOWN')
+icon = '✓' if status == 'PASS' else ('✗' if status == 'FAIL' else '○')
+print(f\"{'$YELLOW' if status == 'FAIL' else ('$RED' if 'INCOMPLETE' in str(data) else '$GREEN')}{icon} {status}{'$NC'}\")
+if data.get('incomplete_reasons'):
+    for r in data['incomplete_reasons']:
+        print(f'  - {r}')
+if data.get('verification_results'):
+    for tool, vr in data['verification_results'].items():
+        p = 'PASS' if vr.get('passed') else 'FAIL'
+        print(f'  {tool}: {p}' + (f\" ({vr.get('error_count', 0)} errors)\" if vr.get('error_count') else ''))
+" 2>/dev/null || echo "$output"
+    else
+        error "checkpoint 验证失败: $output"
+        exit 1
+    fi
 }
 
 cmd_deploy() {
-    log "执行部署..."
-    error "部署功能待实现"
+    local req_id="${1:-}"
+    if [[ -z "$req_id" ]]; then
+        req_id=$(ls -t "$HARNESS_DIR/requirements/" 2>/dev/null | head -1)
+    fi
+    if [[ -z "$req_id" ]]; then
+        error "没有可部署的任务"
+        exit 1
+    fi
+
+    local req_dir="$HARNESS_DIR/requirements/$req_id"
+    local pr_url_file="$req_dir/.pr_url"
+
+    if [[ -f "$pr_url_file" ]]; then
+        local pr_url
+        pr_url=$(cat "$pr_url_file")
+        log "检测到 PR: $pr_url"
+        log "请确认后执行 /ship + /land-and-deploy"
+        echo ""
+        echo -e "${YELLOW}PR URL: $pr_url${NC}"
+        echo -e "${YELLOW}下一步: 在 Claude Code 中运行 /ship${NC}"
+    else
+        log "任务 $req_id 尚未生成 PR"
+        log "请先完成 STAGE 2（执行与验证）"
+        exit 1
+    fi
 }
 
 cmd_report() {
@@ -295,39 +388,76 @@ cmd_report() {
 
 cmd_learn() {
     log "触发学习分析..."
-    python3 -c "
+    PYTHONPATH="$HARNESS_DIR/hermes_harness:$PYTHONPATH" \
+        python3 -c "
 import sys
 sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
 from harness_analyze import main as analyze_main
 analyze_main()
-" 2>&1 || error "分析脚本执行失败"
+" 2>&1 || { error "分析脚本执行失败"; exit 1; }
     success "分析完成，查看报告: hg report"
 }
 
 cmd_handoff() {
     log "Handoff 历史"
     echo "---"
-    python3 -c "
+    PYTHONPATH="$HARNESS_DIR/hermes_harness:$PYTHONPATH" \
+        python3 -c "
 import sys
 sys.path.insert(0, '$HARNESS_DIR/hermes_harness')
 from harness_log import query_logs
-logs = query_logs(levels=['critical'], event_types=['yellow_trigger', 'red_trigger'], limit=20)
-for log in logs:
-    print(log)
+logs = query_logs(levels=['critical'], event_types=['yellow_trigger', 'red_trigger', 'human_input_required'], limit=20)
+if logs:
+    for log in logs:
+        print(log)
+else:
+    print('暂无 handoff 记录')
 " 2>/dev/null || echo "暂无 handoff 记录"
 }
 
 cmd_test() {
     log "运行测试..."
-    if command -v pytest &>/dev/null; then
-        pytest "$HARNESS_DIR/tests" -v
-    else
-        error "pytest 未安装，请运行: pip3 install pytest"
-    fi
+    require_tool "python3"
+    cd "$HARNESS_DIR" && \
+        PYTHONPATH="$HARNESS_DIR/hermes_harness:$PYTHONPATH" \
+        python3 -m pytest tests/ -v --tb=short 2>&1
 }
 
 cmd_rollback() {
-    error "Rollback 功能待实现"
+    log "Rollback 功能"
+    echo "---"
+    local deploy_history="$HARNESS_DIR/logs/deploy_history.jsonl"
+    if [[ ! -f "$deploy_history" ]]; then
+        echo "暂无部署历史"
+        return
+    fi
+
+    local last_deploy
+    last_deploy=$(tail -1 "$deploy_history" 2>/dev/null)
+    if [[ -z "$last_deploy" ]]; then
+        echo "暂无部署历史"
+        return
+    fi
+
+    echo "上一次部署:"
+    echo "$last_deploy" | python3 -m json.tool 2>/dev/null || echo "$last_deploy"
+
+    echo ""
+    echo -e "${YELLOW}确认回滚? (y/N)${NC}"
+    local confirm
+    read -r confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        log "执行回滚..."
+        echo "$last_deploy" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+print(f\"回滚到: {d.get('ref', 'unknown')}\")
+print(f\"PR: {d.get('pr_url', 'N/A')}\")
+print(\"请手动在 GitHub 执行 revert 或联系管理员\")
+"
+    else
+        log "取消回滚"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -340,16 +470,16 @@ main() {
     shift 2>/dev/null || true
 
     case "$command" in
-        init)   cmd_init ;;
-        new)    cmd_new "$@" ;;
-        status) cmd_status ;;
-        align)  cmd_align ;;
-        verify) cmd_verify ;;
-        deploy) cmd_deploy ;;
-        report) cmd_report ;;
-        learn)  cmd_learn ;;
+        init)    cmd_init ;;
+        new)     cmd_new "$@" ;;
+        status)  cmd_status ;;
+        align)   cmd_align ;;
+        verify)  cmd_verify "$@" ;;
+        deploy)  cmd_deploy "$@" ;;
+        report)  cmd_report ;;
+        learn)   cmd_learn ;;
         handoff) cmd_handoff ;;
-        test)   cmd_test ;;
+        test)    cmd_test ;;
         rollback) cmd_rollback ;;
         help|--help|-h|"") show_help ;;
         *)

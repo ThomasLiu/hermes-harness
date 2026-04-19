@@ -28,7 +28,7 @@ EFFICIENCY_THRESHOLDS = {
 
 BENCHMARK_TASK_SECONDS = 600  # 10 分钟
 
-def load_logsSINCE hours: int = 24) -> List[dict]:
+def load_logs_since(hours: int = 24) -> List[dict]:
     """加载过去 N 小时的 CRITICAL 日志"""
     logs = []
     cutoff = datetime.now() - timedelta(hours=hours)
@@ -262,7 +262,7 @@ def main():
     parser.add_argument("--output", default="report", choices=["report", "json"])
     args = parser.parse_args()
 
-    logs = load_logs(hours=args.hours)
+    logs = load_logs_since(hours=args.hours)
 
     if not logs:
         print("# No logs found for the specified period")

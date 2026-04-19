@@ -7,10 +7,12 @@ import subprocess
 import json
 import sys
 import argparse
+import os
+import time
 from pathlib import Path
 from typing import Optional, List
 
-HARNESS_DIR = Path(__file__).resolve().parent.parent.parent
+HARNESS_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = HARNESS_DIR / "config.yaml"
 
 def load_config() -> dict:
@@ -50,7 +52,6 @@ def run_claude_code(
     config = load_config()
     claude_path = config.get("claude_code", {}).get("path", "claude")
 
-    # 构建命令
     cmd = [claude_path]
 
     if model:
@@ -66,7 +67,6 @@ def run_claude_code(
         for f in context_files:
             cmd.extend(["--add-context", str(f)])
 
-    # 添加 system prompt（限制 Claude Code 的行为）
     system_prompt = f"""你正在被 Hermes Harness 调用。
 Harness 的核心理念：
 - MiniMax 做裁判，Claude Code 做执行
@@ -78,14 +78,11 @@ Harness 的核心理念：
 {prompt}
 """
 
-    import os
     env = os.environ.copy()
     env["CLAUDE_CODE_SYSTEM_PROMPT"] = system_prompt
 
     try:
-        import time
         start = time.time()
-
         result = subprocess.run(
             cmd,
             input=prompt,
@@ -94,7 +91,6 @@ Harness 的核心理念：
             timeout=timeout,
             env=env,
         )
-
         duration_ms = int((time.time() - start) * 1000)
 
         return {
@@ -128,30 +124,16 @@ def run_gstack_skill(
     project_dir: Optional[Path] = None,
     timeout: int = 600,
 ) -> dict:
-    """
-    运行 gstack skill
-
-    Args:
-        skill: gstack skill 名称 (e.g. "/review", "/qa")
-        args: skill 参数
-        project_dir: 项目目录
-        timeout: 超时秒数
-
-    Returns:
-        skill 执行结果
-    """
+    """运行 gstack skill"""
     config = load_config()
     gstack_dir = Path(config.get("gstack", {}).get("dir", "~/.claude/skills/gstack")).expanduser()
 
-    # 构建 prompt
     prompt = f"""运行 gstack skill: {skill}
 项目目录: {project_dir or '当前目录'}
 参数: {args}
 
-请执行该 skill 并返回结构化的 evidence 输出。
-"""
+请执行该 skill 并返回结构化的 evidence 输出。"""
 
-    # 调用 Claude Code
     result = run_claude_code(
         prompt=prompt,
         timeout=timeout,
@@ -159,17 +141,74 @@ def run_gstack_skill(
     )
 
     # 记录到日志
-    from harness_log import write_log
-    write_log(
-        level="normal",
-        event_type="skill_execution",
-        skill=skill,
-        success=str(result["success"]),
-        duration_ms=str(result.get("duration_ms", 0)),
-        output_hash=str(hash(result.get("output", ""))[:16]),
-    )
+    try:
+        from harness_log import write_log
+        write_log(
+            level="normal",
+            event_type="skill_execution",
+            skill=skill,
+            success=str(result["success"]),
+            duration_ms=str(result.get("duration_ms", 0)),
+        )
+    except Exception:
+        pass  # 日志失败不影响主流程
 
     return result
+
+# Aliases for test compatibility
+call_claude_code = run_claude_code
+invoke_gstack_skill = run_gstack_skill
+
+class ClaudeCodeRunner:
+    """
+    Orchestrates Claude Code execution with Router decisions.
+    MiniMax Router decides skill, this runner executes it.
+    """
+
+    def __init__(self, project_path: Path, minimax_router=None):
+        self.project_path = Path(project_path)
+        self.router = minimax_router or (lambda task: {"skill": "/review", "flag": "GREEN"})
+        self.last_result = None
+
+    def run_task(self, task: str) -> dict:
+        """Execute a task: route it, then run the appropriate gstack skill."""
+        route = self.router(task)
+        skill = route.get("skill", "/review")
+        flag = route.get("flag", "GREEN")
+
+        result = run_gstack_skill(
+            skill=skill,
+            args=task,
+            project_dir=self.project_path,
+            timeout=600,
+        )
+
+        parsed = {"skill": skill, "flag": flag, "success": result["success"]}
+        try:
+            output = result.get("output", "")
+            if output:
+                data = json.loads(output)
+                parsed.update(data)
+                parsed["parsed"] = True
+            else:
+                parsed["parsed"] = False
+                parsed["error"] = result.get("error", "no output")
+        except json.JSONDecodeError:
+            parsed["parsed"] = False
+            parsed["raw_output"] = result.get("output", "")[:500]
+            parsed["error"] = result.get("error", "")
+
+        self.last_result = parsed
+        return parsed
+
+    def checkpoint_verify(self) -> dict:
+        """Run checkpoint verification on the last result."""
+        from harness_checkpoint import check_evidence
+        if not self.last_result:
+            return {"status": "ERROR", "reason": "no result to verify"}
+        evidence = self.last_result.get("evidence", {})
+        skill = self.last_result.get("skill", "/review")
+        return check_evidence(skill, evidence, project_dir=self.project_path)
 
 def main():
     parser = argparse.ArgumentParser(description="Hermes Harness — Claude Code 接口")
