@@ -1,0 +1,16 @@
+# Hermes Harness — 任务 Checkpoint
+# 此文件在 context 压缩后用于恢复状态
+task: "测试任务"
+task_id: "task-20260419-194104"
+started_at: "2026-04-19T11:41:04Z"
+last_checkpoint: "2026-04-19T11:41:04Z"
+current_step: 0
+total_steps: 5
+step_description: ""
+
+completed_steps: []
+in_progress: null
+next_steps: []
+files_modified: []
+open_issues: []
+active_checkpoint: task-20260419-194104
