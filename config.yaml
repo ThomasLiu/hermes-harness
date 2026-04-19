@@ -9,7 +9,7 @@ minimax:
 
 # Claude Code（用于执行 gstack skills）
 claude_code:
-  path: "claude"
+  path: "/Users/thomas/Library/pnpm/global/5/.pnpm/@anthropic-ai+claude-code@2.1.68/node_modules/@anthropic-ai/claude-code/node_modules/.bin/claude"
   model: "claude-opus-4-7"
 
 # gstack 路径

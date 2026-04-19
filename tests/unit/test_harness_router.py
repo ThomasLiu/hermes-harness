@@ -1,6 +1,6 @@
 """
 Tests for harness-router.py
-TDD: Router 决策逻辑、MiniMax API mock
+TDD: Router 决策逻辑、call_router_llm mock
 """
 import pytest
 import json
@@ -34,9 +34,9 @@ class TestRouterBuildPrompt:
         assert "/office-hours" in system
 
 class TestRouterDecision:
-    """Router 决策测试（mock MiniMax API）"""
+    """Router 决策测试（mock call_router_llm）"""
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_route_explore_task(self, mock_call):
         """探索任务应该路由到 /office-hours"""
         mock_call.return_value = json.dumps({
@@ -53,7 +53,7 @@ class TestRouterDecision:
         assert result["flag"] == "GREEN"
         assert result["confidence"] == 0.9
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_route_optimize_task(self, mock_call):
         """优化任务应该路由到 /review"""
         mock_call.return_value = json.dumps({
@@ -68,7 +68,7 @@ class TestRouterDecision:
         assert result["intent"] == "OPTIMIZE"
         assert result["skill"] == "/review"
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_route_review_task(self, mock_call):
         """Review 任务路由到 /review"""
         mock_call.return_value = json.dumps({
@@ -83,7 +83,7 @@ class TestRouterDecision:
         assert result["intent"] == "REVIEW"
         assert result["flag"] == "YELLOW"
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_route_red_flag_task(self, mock_call):
         """危险任务应该 RED"""
         mock_call.return_value = json.dumps({
@@ -97,7 +97,7 @@ class TestRouterDecision:
         result = route_task("直接修改生产数据库")
         assert result["flag"] == "RED"
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_api_failure_graceful_degradation(self, mock_call):
         """MiniMax API 失败时优雅降级"""
         mock_call.side_effect = RuntimeError("API timeout")
@@ -108,7 +108,7 @@ class TestRouterDecision:
         assert result["flag"] == "YELLOW"
         assert "error" in result
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_invalid_json_response_fallback(self, mock_call):
         """MiniMax 返回非 JSON 时降级"""
         mock_call.return_value = "Oops, something went wrong"
@@ -118,7 +118,7 @@ class TestRouterDecision:
         assert result["flag"] == "YELLOW"
         assert "raw_response" in result
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_missing_fields_in_response(self, mock_call):
         """MiniMax 响应缺少字段时补默认值"""
         mock_call.return_value = json.dumps({
@@ -131,7 +131,7 @@ class TestRouterDecision:
         assert result["flag"] == "YELLOW"  # 默认值
         assert result["reason"] == ""  # 默认空
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_invalid_flag_normalized(self, mock_call):
         """无效的 flag 值被规范化为 YELLOW"""
         mock_call.return_value = json.dumps({
@@ -144,7 +144,7 @@ class TestRouterDecision:
         result = route_task("test")
         assert result["flag"] == "YELLOW"  # 规范化
 
-    @patch("harness_router.call_minimax")
+    @patch("harness_router.call_router_llm")
     def test_json_code_block_extraction(self, mock_call):
         """从 markdown 代码块中提取 JSON"""
         mock_call.return_value = """Here is the routing decision:

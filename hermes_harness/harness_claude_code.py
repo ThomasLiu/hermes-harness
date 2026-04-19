@@ -58,14 +58,14 @@ def run_claude_code(
         cmd.extend(["--model", model])
 
     cmd.extend([
-        "--print",
-        "--no-input",
-        "--verbose",
+        "-p",                        # non-interactive print mode
+        "--output-format", "json",    # JSON 输出
+        "--no-session-persistence",  # 不保存会话
     ])
 
     if context_files:
         for f in context_files:
-            cmd.extend(["--add-context", str(f)])
+            cmd.extend(["--add-dir", str(f)])
 
     system_prompt = f"""你正在被 Hermes Harness 调用。
 Harness 的核心理念：
@@ -78,8 +78,9 @@ Harness 的核心理念：
 {prompt}
 """
 
-    env = os.environ.copy()
-    env["CLAUDE_CODE_SYSTEM_PROMPT"] = system_prompt
+    cmd.extend([
+        "--system-prompt", system_prompt,
+    ])
 
     try:
         start = time.time()
@@ -89,7 +90,7 @@ Harness 的核心理念：
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=env,
+            env=os.environ.copy(),
         )
         duration_ms = int((time.time() - start) * 1000)
 
